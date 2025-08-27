@@ -2,7 +2,8 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:syncfusion_flutter_pdf/pdf.dart';
+import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
+import 'package:pdfx/pdfx.dart' as pdfx;
 
 void main() {
   runApp(const PDFMergerApp());
@@ -59,14 +60,14 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
     }
 
     try {
-      final PdfDocument newDocument = PdfDocument();
-      PdfSection? section;
+      final sf.PdfDocument newDocument = sf.PdfDocument();
+      sf.PdfSection? section;
 
       for (final bytes in selectedPDFBytes) {
-        final PdfDocument loaded = PdfDocument(inputBytes: bytes);
+        final sf.PdfDocument loaded = sf.PdfDocument(inputBytes: bytes);
 
         for (int i = 0; i < loaded.pages.count; i++) {
-          final PdfTemplate template = loaded.pages[i].createTemplate();
+          final sf.PdfTemplate template = loaded.pages[i].createTemplate();
 
           if (section == null ||
               section.pageSettings.size != template.size) {
@@ -165,14 +166,58 @@ class DeletePagesScreen extends StatefulWidget {
 }
 
 class _DeletePagesScreenState extends State<DeletePagesScreen> {
-  late PdfDocument document;
+  late sf.PdfDocument document;
   late List<bool> selectedPages;
+  List<Uint8List?> pageImages = [];
+  bool isLoadingImages = true;
 
   @override
   void initState() {
     super.initState();
-    document = PdfDocument(inputBytes: widget.pdfBytes);
+    document = sf.PdfDocument(inputBytes: widget.pdfBytes);
     selectedPages = List<bool>.filled(document.pages.count, false);
+    _generatePagePreviews();
+  }
+
+  Future<void> _generatePagePreviews() async {
+    setState(() {
+      isLoadingImages = true;
+      pageImages = List<Uint8List?>.filled(document.pages.count, null);
+    });
+
+    try {
+      // Use pdfx to generate page previews
+      final pdfDocument = await pdfx.PdfDocument.openData(widget.pdfBytes);
+
+      for (int i = 0; i < document.pages.count && i < pdfDocument.pagesCount; i++) {
+        try {
+          final page = await pdfDocument.getPage(i + 1);
+          final pageImage = await page.render(
+            width: 200,
+            height: 280,
+            format: pdfx.PdfPageImageFormat.png,
+          );
+          page.close();
+
+          if (mounted && pageImage != null && pageImage.bytes.isNotEmpty) {
+            setState(() {
+              pageImages[i] = pageImage.bytes;
+            });
+          }
+        } catch (pageError) {
+          debugPrint('Error rendering page ${i + 1}: $pageError');
+        }
+      }
+      pdfDocument.close();
+    } catch (e) {
+      debugPrint('Error generating page previews: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          isLoadingImages = false;
+        });
+      }
+    }
   }
 
   Future<void> deleteSelectedPages() async {
@@ -190,47 +235,215 @@ class _DeletePagesScreenState extends State<DeletePagesScreen> {
       return;
     }
 
-    // Delete pages (from last to first to avoid index shift)
-    for (int i = pagesToDelete.length - 1; i >= 0; i--) {
-      document.pages.removeAt(pagesToDelete[i]);
-    }
-
-    final newBytes = await document.save();
-    document.dispose();
-
-    final downloadsDir = Directory('/storage/emulated/0/Download');
-    final outPath =
-        '${downloadsDir.path}/deleted_${DateTime.now().millisecondsSinceEpoch}.pdf';
-    final outFile = File(outPath);
-    await outFile.writeAsBytes(newBytes, flush: true);
-
-    if (mounted) {
+    if (pagesToDelete.length >= document.pages.count) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('✅ New PDF saved at: $outPath')),
+        const SnackBar(content: Text("Cannot delete all pages. At least one page must remain.")),
       );
-      Navigator.pop(context);
+      return;
     }
+
+    try {
+      // Create a new document with only the pages we want to keep
+      final sf.PdfDocument newDocument = sf.PdfDocument();
+      sf.PdfSection? section;
+
+      for (int i = 0; i < document.pages.count; i++) {
+        if (!selectedPages[i]) {
+          // Keep this page
+          final sf.PdfTemplate template = document.pages[i].createTemplate();
+
+          if (section == null ||
+              section.pageSettings.size != template.size) {
+            section = newDocument.sections!.add();
+            section.pageSettings.size = template.size;
+            section.pageSettings.margins.all = 0;
+          }
+          section.pages
+              .add()
+              .graphics
+              .drawPdfTemplate(template, const Offset(0, 0));
+        }
+      }
+
+      final newBytes = await newDocument.save();
+      newDocument.dispose();
+
+      final downloadsDir = Directory('/storage/emulated/0/Download');
+      final outPath =
+          '${downloadsDir.path}/deleted_${DateTime.now().millisecondsSinceEpoch}.pdf';
+      final outFile = File(outPath);
+      await outFile.writeAsBytes(newBytes, flush: true);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('✅ New PDF saved at: $outPath')),
+        );
+        Navigator.pop(context);
+      }
+    } catch (e, st) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error deleting pages: $e')),
+        );
+      }
+      debugPrint('$e\n$st');
+    }
+  }
+
+  void _selectAll() {
+    setState(() {
+      for (int i = 0; i < selectedPages.length; i++) {
+        selectedPages[i] = true;
+      }
+    });
+  }
+
+  void _deselectAll() {
+    setState(() {
+      for (int i = 0; i < selectedPages.length; i++) {
+        selectedPages[i] = false;
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    document.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final selectedCount = selectedPages.where((selected) => selected).length;
+
     return Scaffold(
-      appBar: AppBar(title: const Text("Select Pages to Delete")),
-      body: ListView.builder(
+      appBar: AppBar(
+        title: Text("Select Pages to Delete ($selectedCount selected)"),
+        actions: [
+          TextButton(
+            onPressed: _selectAll,
+            child: const Text('Select All', style: TextStyle(color: Colors.white)),
+          ),
+          TextButton(
+            onPressed: _deselectAll,
+            child: const Text('Clear All', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+      body: isLoadingImages
+          ? const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text('Loading page previews...'),
+          ],
+        ),
+      )
+          : GridView.builder(
+        padding: const EdgeInsets.all(8),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2,
+          childAspectRatio: 0.7,
+          crossAxisSpacing: 8,
+          mainAxisSpacing: 8,
+        ),
         itemCount: document.pages.count,
         itemBuilder: (context, index) {
-          return CheckboxListTile(
-            value: selectedPages[index],
-            title: Text("Page ${index + 1}"),
-            onChanged: (val) {
-              setState(() => selectedPages[index] = val ?? false);
-            },
+          return Card(
+            elevation: 4,
+            child: InkWell(
+              onTap: () {
+                setState(() {
+                  selectedPages[index] = !selectedPages[index];
+                });
+              },
+              child: Column(
+                children: [
+                  Expanded(
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Container(
+                          margin: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: selectedPages[index]
+                                  ? Colors.red
+                                  : Colors.grey.shade300,
+                              width: selectedPages[index] ? 3 : 1,
+                            ),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: pageImages[index] != null
+                              ? ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: Image.memory(
+                              pageImages[index]!,
+                              fit: BoxFit.contain,
+                            ),
+                          )
+                              : const Center(
+                            child: CircularProgressIndicator(),
+                          ),
+                        ),
+                        Positioned(
+                          top: 4,
+                          right: 4,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: selectedPages[index]
+                                  ? Colors.red
+                                  : Colors.grey.shade200,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                            child: Icon(
+                              selectedPages[index]
+                                  ? Icons.check_circle
+                                  : Icons.circle_outlined,
+                              color: selectedPages[index]
+                                  ? Colors.white
+                                  : Colors.grey,
+                              size: 24,
+                            ),
+                          ),
+                        ),
+                        if (selectedPages[index])
+                          Container(
+                            margin: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.red.withOpacity(0.3),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text(
+                      'Page ${index + 1}',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: selectedPages[index]
+                            ? Colors.red
+                            : Colors.black,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           );
         },
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: deleteSelectedPages,
-        child: const Icon(Icons.delete),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: selectedCount > 0 ? deleteSelectedPages : null,
+        backgroundColor: selectedCount > 0 ? Colors.red : Colors.grey,
+        icon: const Icon(Icons.delete),
+        label: Text('Delete $selectedCount pages'),
       ),
     );
   }
