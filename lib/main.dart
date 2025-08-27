@@ -14,7 +14,7 @@ class PDFMergerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'PDF Merger',
+      title: 'PDF Merger & Editor',
       theme: ThemeData(primarySwatch: Colors.blue),
       home: const PDFMergerScreen(),
     );
@@ -37,7 +37,7 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
       type: FileType.custom,
       allowedExtensions: ['pdf'],
       allowMultiple: true,
-      withData: true, // ensures we get raw bytes
+      withData: true,
     );
 
     if (result != null) {
@@ -85,7 +85,6 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
       final mergedBytes = await newDocument.save();
       newDocument.dispose();
 
-      // 🔽 Save into Android Downloads folder
       final downloadsDir = Directory('/storage/emulated/0/Download');
       final outPath =
           '${downloadsDir.path}/merged_${DateTime.now().millisecondsSinceEpoch}.pdf';
@@ -105,10 +104,28 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
     }
   }
 
+  Future<void> pickPDFForDelete() async {
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf'],
+      allowMultiple: false,
+      withData: true,
+    );
+
+    if (result != null && result.files.single.bytes != null) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => DeletePagesScreen(pdfBytes: result.files.single.bytes!),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("PDF Merger (Downloads Save)")),
+      appBar: AppBar(title: const Text("PDF Merger & Editor")),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -124,11 +141,96 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
               onPressed: mergePDFs,
               child: const Text("Merge PDFs"),
             ),
+            const Divider(height: 40),
+            ElevatedButton(
+              onPressed: pickPDFForDelete,
+              child: const Text("Delete Pages from PDF"),
+            ),
             const SizedBox(height: 20),
             if (mergedPath != null)
-              SelectableText("📂 Merged file: $mergedPath"),
+              SelectableText("📂 Last merged file: $mergedPath"),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class DeletePagesScreen extends StatefulWidget {
+  final Uint8List pdfBytes;
+  const DeletePagesScreen({super.key, required this.pdfBytes});
+
+  @override
+  State<DeletePagesScreen> createState() => _DeletePagesScreenState();
+}
+
+class _DeletePagesScreenState extends State<DeletePagesScreen> {
+  late PdfDocument document;
+  late List<bool> selectedPages;
+
+  @override
+  void initState() {
+    super.initState();
+    document = PdfDocument(inputBytes: widget.pdfBytes);
+    selectedPages = List<bool>.filled(document.pages.count, false);
+  }
+
+  Future<void> deleteSelectedPages() async {
+    final pagesToDelete = <int>[];
+    for (int i = 0; i < selectedPages.length; i++) {
+      if (selectedPages[i]) {
+        pagesToDelete.add(i);
+      }
+    }
+
+    if (pagesToDelete.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("No pages selected")),
+      );
+      return;
+    }
+
+    // Delete pages (from last to first to avoid index shift)
+    for (int i = pagesToDelete.length - 1; i >= 0; i--) {
+      document.pages.removeAt(pagesToDelete[i]);
+    }
+
+    final newBytes = await document.save();
+    document.dispose();
+
+    final downloadsDir = Directory('/storage/emulated/0/Download');
+    final outPath =
+        '${downloadsDir.path}/deleted_${DateTime.now().millisecondsSinceEpoch}.pdf';
+    final outFile = File(outPath);
+    await outFile.writeAsBytes(newBytes, flush: true);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('✅ New PDF saved at: $outPath')),
+      );
+      Navigator.pop(context);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Select Pages to Delete")),
+      body: ListView.builder(
+        itemCount: document.pages.count,
+        itemBuilder: (context, index) {
+          return CheckboxListTile(
+            value: selectedPages[index],
+            title: Text("Page ${index + 1}"),
+            onChanged: (val) {
+              setState(() => selectedPages[index] = val ?? false);
+            },
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: deleteSelectedPages,
+        child: const Icon(Icons.delete),
       ),
     );
   }
