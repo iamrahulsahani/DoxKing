@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
@@ -8,6 +10,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:image_cropper/image_cropper.dart';
+import 'package:syncfusion_flutter_signaturepad/signaturepad.dart';
 
 void main() {
   runApp(const PDFMergerApp());
@@ -326,6 +329,25 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
             ElevatedButton(
               onPressed: unlockPDF,
               child: const Text("🔓 Unlock PDF"),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final result = await FilePicker.platform.pickFiles(
+                  type: FileType.custom,
+                  allowedExtensions: const ['pdf'],
+                  allowMultiple: false,
+                  withData: true,
+                );
+                if (result != null && result.files.single.bytes != null) {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => AnnotateSignScreen(pdfBytes: result.files.single.bytes!),
+                    ),
+                  );
+                }
+              },
+              child: const Text("✍️ Annotate & Sign PDF"),
             ),
             const SizedBox(height: 20),
             if (mergedPath != null)
@@ -938,6 +960,225 @@ class _DeletePagesScreenState extends State<DeletePagesScreen> {
         backgroundColor: selectedCount > 0 ? Colors.red : Colors.grey,
         icon: const Icon(Icons.delete),
         label: Text('Delete $selectedCount pages'),
+      ),
+    );
+  }
+}
+
+class AnnotateSignScreen extends StatefulWidget {
+  final Uint8List pdfBytes;
+  const AnnotateSignScreen({super.key, required this.pdfBytes});
+
+  @override
+  State<AnnotateSignScreen> createState() => _AnnotateSignScreenState();
+}
+
+class _AnnotateSignScreenState extends State<AnnotateSignScreen> {
+  late sf.PdfDocument document;
+  pdfx.PdfDocument? pdfViewDoc;
+  final List<Uint8List?> pageImages = [];
+  bool isLoading = true;
+  final GlobalKey<SfSignaturePadState> _sigKey = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+    document = sf.PdfDocument(inputBytes: widget.pdfBytes);
+    _loadPreviews();
+  }
+
+  Future<void> _loadPreviews() async {
+    pdfViewDoc = await pdfx.PdfDocument.openData(widget.pdfBytes);
+    for (int i = 0; i < (pdfViewDoc?.pagesCount ?? 0); i++) {
+      final page = await pdfViewDoc!.getPage(i + 1);
+      final img = await page.render(
+        width: 300,
+        height: 400,
+        format: pdfx.PdfPageImageFormat.png,
+      );
+      await page.close();
+      pageImages.add(img?.bytes);
+    }
+    if (mounted) setState(() => isLoading = false);
+  }
+
+  // Add signature bytes to first page (or change target page/position as needed)
+  Future<void> _addSignatureFromBytes(Uint8List data) async {
+    try {
+      final sigImg = sf.PdfBitmap(data);
+      final page = document.pages[0]; // first page
+      // Draw image at chosen position:
+      page.graphics.drawImage(sigImg, const Rect.fromLTWH(100, 500, 200, 80));
+      await _saveAnnotatedPDF();
+    } catch (e) {
+      debugPrint('Error adding signature: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error adding signature: $e')),
+        );
+      }
+    }
+  }
+
+  // Highlight implemented as a semi-opaque rectangle overlay to avoid API overload ambiguity
+  Future<void> _highlightText() async {
+    try {
+      final page = document.pages[0];
+      final Rect highlightBounds = const Rect.fromLTWH(50, 600, 200, 20);
+
+      // draw semi-transparent rectangle (visual highlight)
+      page.graphics.drawRectangle(
+        brush: sf.PdfSolidBrush(sf.PdfColor(255, 255, 0, 120)),
+        bounds: highlightBounds,
+      );
+
+      await _saveAnnotatedPDF();
+    } catch (e) {
+      debugPrint('Error adding highlight: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error adding highlight: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _addNote() async {
+    try {
+      final page = document.pages[0];
+      final note = sf.PdfPopupAnnotation(
+        const Rect.fromLTWH(50, 650, 20, 20),
+        'This is a note',
+      );
+      note.color = sf.PdfColor(0, 0, 255);
+      page.annotations.add(note);
+
+      await _saveAnnotatedPDF();
+    } catch (e) {
+      debugPrint('Error adding note: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error adding note: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _saveAnnotatedPDF() async {
+    final newBytes = await document.save();
+    final downloadsDir = Directory('/storage/emulated/0/Download');
+    final outPath =
+        '${downloadsDir.path}/annotated_${DateTime.now().millisecondsSinceEpoch}.pdf';
+    final outFile = File(outPath);
+    await outFile.writeAsBytes(newBytes, flush: true);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('✍️ Saved annotated PDF at: $outPath')),
+    );
+  }
+
+  @override
+  void dispose() {
+    document.dispose();
+    pdfViewDoc?.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Annotate & Sign"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.brush),
+            onPressed: _highlightText,
+          ),
+          IconButton(
+            icon: const Icon(Icons.note_add),
+            onPressed: _addNote,
+          ),
+          IconButton(
+            icon: const Icon(Icons.save),
+            onPressed: _saveAnnotatedPDF,
+          ),
+        ],
+      ),
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView.builder(
+        itemCount: pageImages.length,
+        itemBuilder: (_, i) {
+          return Card(
+            margin: const EdgeInsets.all(8),
+            child: pageImages[i] != null
+                ? Image.memory(pageImages[i]!)
+                : const SizedBox(),
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () {
+          // Show signature dialog. Capture signature BEFORE closing the dialog.
+          showDialog(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text("Sign PDF"),
+              content: SizedBox(
+                height: 200,
+                child: SfSignaturePad(
+                  key: _sigKey,
+                  backgroundColor: Colors.grey[200]!,
+                  strokeColor: Colors.black,
+                  minimumStrokeWidth: 2,
+                  maximumStrokeWidth: 4,
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    // clear current strokes
+                    _sigKey.currentState?.clear();
+                  },
+                  child: const Text("Clear"),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text("Cancel"),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    // Capture signature image while dialog is still open
+                    final ui.Image? signatureImage = await _sigKey.currentState?.toImage();
+                    if (signatureImage != null) {
+                      final ByteData? bdata = await signatureImage.toByteData(format: ui.ImageByteFormat.png);                      if (bdata != null) {
+                        final bytes = bdata.buffer.asUint8List();
+                        await _addSignatureFromBytes(bytes);
+                      } else {
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Failed to capture signature bytes')),
+                          );
+                        }
+                      }
+                    } else {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('No signature drawn')),
+                        );
+                      }
+                    }
+                    Navigator.pop(context); // close dialog after capturing
+                  },
+                  child: const Text("Add Signature"),
+                ),
+              ],
+            ),
+          );
+        },
+        label: const Text("Sign"),
+        icon: const Icon(Icons.edit),
       ),
     );
   }
