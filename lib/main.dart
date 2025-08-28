@@ -1,9 +1,15 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
 import 'package:pdfx/pdfx.dart' as pdfx;
+import 'package:image_picker/image_picker.dart';
+import 'package:image/image.dart' as img;
+import 'package:path/path.dart' as path;
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   runApp(const PDFMergerApp());
@@ -15,7 +21,7 @@ class PDFMergerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'PDF Merger & Editor',
+      title: 'PDF Merger & Scanner',
       theme: ThemeData(primarySwatch: Colors.blue),
       home: const PDFMergerScreen(),
     );
@@ -123,10 +129,29 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
     }
   }
 
+  Future<void> startImageScanning() async {
+    // Request camera permission
+    final cameraStatus = await Permission.camera.request();
+    final storageStatus = await Permission.storage.request();
+
+    if (cameraStatus.isGranted || storageStatus.isGranted) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => const ImageScannerScreen(),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Camera and storage permissions are required')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("PDF Merger & Editor")),
+      appBar: AppBar(title: const Text("PDF Merger & Scanner")),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -147,6 +172,16 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
               onPressed: pickPDFForDelete,
               child: const Text("Delete Pages from PDF"),
             ),
+            const Divider(height: 40),
+            ElevatedButton.icon(
+              onPressed: startImageScanning,
+              icon: const Icon(Icons.scanner),
+              label: const Text("Scan Images to PDF"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+              ),
+            ),
             const SizedBox(height: 20),
             if (mergedPath != null)
               SelectableText("📂 Last merged file: $mergedPath"),
@@ -155,6 +190,388 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
       ),
     );
   }
+}
+
+class ImageScannerScreen extends StatefulWidget {
+  const ImageScannerScreen({super.key});
+
+  @override
+  State<ImageScannerScreen> createState() => _ImageScannerScreenState();
+}
+
+class _ImageScannerScreenState extends State<ImageScannerScreen> {
+  final ImagePicker _picker = ImagePicker();
+  List<ProcessedImage> _images = [];
+  bool _isProcessing = false;
+
+  Future<void> _pickImageFromCamera() async {
+    final XFile? image = await _picker.pickImage(
+      source: ImageSource.camera,
+      maxWidth: 1920,
+      maxHeight: 1080,
+      imageQuality: 90,
+    );
+
+    if (image != null) {
+      await _processImage(image);
+    }
+  }
+
+  Future<void> _pickImageFromGallery() async {
+    final List<XFile> images = await _picker.pickMultiImage(
+      maxWidth: 1920,
+      maxHeight: 1080,
+      imageQuality: 90,
+    );
+
+    for (final image in images) {
+      await _processImage(image);
+    }
+  }
+
+  Future<void> _processImage(XFile imageFile) async {
+    setState(() => _isProcessing = true);
+
+    try {
+      final bytes = await imageFile.readAsBytes();
+
+      if (bytes.isEmpty) {
+        throw Exception('Image file is empty');
+      }
+
+      final decodedImage = img.decodeImage(bytes);
+
+      if (decodedImage != null && decodedImage.width > 0 && decodedImage.height > 0) {
+        setState(() {
+          _images.add(ProcessedImage(
+            originalBytes: bytes,
+            processedImage: decodedImage,
+            currentFilter: ImageFilter.none,
+          ));
+        });
+      } else {
+        throw Exception('Failed to decode image or invalid dimensions');
+      }
+    } catch (e) {
+      debugPrint('Error processing image: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error processing image: $e')),
+      );
+    } finally {
+      setState(() => _isProcessing = false);
+    }
+  }
+
+  void _applyFilter(int index, ImageFilter filter) {
+    setState(() {
+      _images[index].currentFilter = filter;
+    });
+  }
+
+  void _removeImage(int index) {
+    setState(() {
+      _images.removeAt(index);
+    });
+  }
+
+  Future<void> _createPDF() async {
+    if (_images.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No images to create PDF')),
+      );
+      return;
+    }
+
+    setState(() => _isProcessing = true);
+
+    try {
+      final sf.PdfDocument document = sf.PdfDocument();
+
+      for (int i = 0; i < _images.length; i++) {
+        final processedImageData = _getFilteredImageBytes(_images[i]);
+        final sf.PdfBitmap bitmap = sf.PdfBitmap(processedImageData);
+
+        final sf.PdfPage page = document.pages.add();
+        final Size pageSize = page.getClientSize();
+
+        // Calculate image dimensions to fit page
+        final double imageAspectRatio = bitmap.width / bitmap.height;
+        final double pageAspectRatio = pageSize.width / pageSize.height;
+
+        double drawWidth, drawHeight;
+        if (imageAspectRatio > pageAspectRatio) {
+          drawWidth = pageSize.width;
+          drawHeight = pageSize.width / imageAspectRatio;
+        } else {
+          drawHeight = pageSize.height;
+          drawWidth = pageSize.height * imageAspectRatio;
+        }
+
+        final double x = (pageSize.width - drawWidth) / 2;
+        final double y = (pageSize.height - drawHeight) / 2;
+
+        page.graphics.drawImage(
+          bitmap,
+          Rect.fromLTWH(x, y, drawWidth, drawHeight),
+        );
+      }
+
+      final List<int> bytes = await document.save();
+      document.dispose();
+
+      final downloadsDir = Directory('/storage/emulated/0/Download');
+      final fileName = 'scanned_${DateTime.now().millisecondsSinceEpoch}.pdf';
+      final file = File('${downloadsDir.path}/$fileName');
+      await file.writeAsBytes(bytes);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('✅ PDF saved: ${file.path}')),
+      );
+
+      Navigator.pop(context);
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error creating PDF: $e')),
+      );
+    } finally {
+      setState(() => _isProcessing = false);
+    }
+  }
+
+  Uint8List _getFilteredImageBytes(ProcessedImage processedImage) {
+    try {
+      // Create a copy of the original image
+      img.Image filteredImage = img.Image.from(processedImage.processedImage);
+
+      switch (processedImage.currentFilter) {
+        case ImageFilter.blackAndWhite:
+          filteredImage = img.grayscale(filteredImage);
+          // Increase contrast for black and white
+          filteredImage = img.contrast(filteredImage, contrast: 1.5);
+          break;
+        case ImageFilter.sepia:
+          filteredImage = img.sepia(filteredImage);
+          break;
+        case ImageFilter.highContrast:
+          filteredImage = img.contrast(filteredImage, contrast: 2.0);
+          // Apply additional brightness adjustment by manipulating pixels
+          filteredImage = img.adjustColor(filteredImage, brightness: 1.1);
+          break;
+        case ImageFilter.none:
+        default:
+        // No filter applied
+          break;
+      }
+
+      return Uint8List.fromList(img.encodePng(filteredImage));
+    } catch (e) {
+      debugPrint('Error applying filter: $e');
+      // Return original bytes if filter fails
+      return processedImage.originalBytes;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Scanner (${_images.length} images)'),
+        actions: [
+          if (_images.isNotEmpty)
+            TextButton(
+              onPressed: _isProcessing ? null : _createPDF,
+              child: const Text(
+                'Create PDF',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              ),
+            ),
+        ],
+      ),
+      body: _isProcessing
+          ? const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text('Processing...'),
+          ],
+        ),
+      )
+          : _images.isEmpty
+          ? Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.scanner, size: 80, color: Colors.grey[400]),
+            const SizedBox(height: 16),
+            Text(
+              'No images scanned yet',
+              style: TextStyle(fontSize: 18, color: Colors.grey[600]),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Use the camera or gallery buttons below',
+              style: TextStyle(color: Colors.grey[500]),
+            ),
+          ],
+        ),
+      )
+          : ListView.builder(
+        itemCount: _images.length,
+        itemBuilder: (context, index) {
+          return _buildImageCard(index);
+        },
+      ),
+      floatingActionButton: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          FloatingActionButton.extended(
+            onPressed: _isProcessing ? null : _pickImageFromCamera,
+            heroTag: "camera",
+            icon: const Icon(Icons.camera_alt),
+            label: const Text('Camera'),
+          ),
+          FloatingActionButton.extended(
+            onPressed: _isProcessing ? null : _pickImageFromGallery,
+            heroTag: "gallery",
+            icon: const Icon(Icons.photo_library),
+            label: const Text('Gallery'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildImageCard(int index) {
+    final processedImage = _images[index];
+
+    // Use a fallback mechanism for image display
+    Widget imageWidget;
+
+    try {
+      if (processedImage.currentFilter == ImageFilter.none) {
+        // Show original image without processing to avoid errors
+        imageWidget = Image.memory(
+          processedImage.originalBytes,
+          fit: BoxFit.contain,
+          errorBuilder: (context, error, stackTrace) {
+            return const Center(
+              child: Icon(Icons.error, color: Colors.red),
+            );
+          },
+        );
+      } else {
+        // Apply filter for preview
+        final imageBytes = _getFilteredImageBytes(processedImage);
+        imageWidget = Image.memory(
+          imageBytes,
+          fit: BoxFit.contain,
+          errorBuilder: (context, error, stackTrace) {
+            // Fallback to original image if filter fails
+            return Image.memory(
+              processedImage.originalBytes,
+              fit: BoxFit.contain,
+            );
+          },
+        );
+      }
+    } catch (e) {
+      debugPrint('Error building image widget: $e');
+      imageWidget = const Center(
+        child: Icon(Icons.error, color: Colors.red),
+      );
+    }
+
+    return Card(
+      margin: const EdgeInsets.all(8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Image preview
+          SizedBox(
+            height: 200,
+            width: double.infinity,
+            child: imageWidget,
+          ),
+
+          // Filter options
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Page ${index + 1} - Filters:',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  children: ImageFilter.values.map((filter) {
+                    final isSelected = processedImage.currentFilter == filter;
+                    return FilterChip(
+                      label: Text(_getFilterName(filter)),
+                      selected: isSelected,
+                      onSelected: (_) => _applyFilter(index, filter),
+                      selectedColor: Colors.blue.withOpacity(0.3),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Current: ${_getFilterName(processedImage.currentFilter)}',
+                      style: TextStyle(color: Colors.grey[600]),
+                    ),
+                    IconButton(
+                      onPressed: () => _removeImage(index),
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      tooltip: 'Remove image',
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _getFilterName(ImageFilter filter) {
+    switch (filter) {
+      case ImageFilter.none:
+        return 'Original';
+      case ImageFilter.blackAndWhite:
+        return 'B&W';
+      case ImageFilter.sepia:
+        return 'Sepia';
+      case ImageFilter.highContrast:
+        return 'High Contrast';
+    }
+  }
+}
+
+enum ImageFilter {
+  none,
+  blackAndWhite,
+  sepia,
+  highContrast,
+}
+
+class ProcessedImage {
+  final Uint8List originalBytes;
+  final img.Image processedImage;
+  ImageFilter currentFilter;
+
+  ProcessedImage({
+    required this.originalBytes,
+    required this.processedImage,
+    required this.currentFilter,
+  });
 }
 
 class DeletePagesScreen extends StatefulWidget {
@@ -186,7 +603,6 @@ class _DeletePagesScreenState extends State<DeletePagesScreen> {
     });
 
     try {
-      // Use pdfx to generate page previews
       final pdfDocument = await pdfx.PdfDocument.openData(widget.pdfBytes);
 
       for (int i = 0; i < document.pages.count && i < pdfDocument.pagesCount; i++) {
@@ -243,13 +659,11 @@ class _DeletePagesScreenState extends State<DeletePagesScreen> {
     }
 
     try {
-      // Create a new document with only the pages we want to keep
       final sf.PdfDocument newDocument = sf.PdfDocument();
       sf.PdfSection? section;
 
       for (int i = 0; i < document.pages.count; i++) {
         if (!selectedPages[i]) {
-          // Keep this page
           final sf.PdfTemplate template = document.pages[i].createTemplate();
 
           if (section == null ||
