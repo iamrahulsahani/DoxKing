@@ -130,6 +130,140 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
     }
   }
 
+  Future<void> lockPDF() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['pdf'],
+      allowMultiple: false,
+      withData: true,
+    );
+
+    if (result != null && result.files.single.bytes != null) {
+      final pdfBytes = result.files.single.bytes!;
+      final TextEditingController passCtrl = TextEditingController();
+
+      await showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text("Set PDF Password"),
+          content: TextField(
+            controller: passCtrl,
+            obscureText: true,
+            decoration: const InputDecoration(hintText: "Enter password"),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cancel"),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, passCtrl.text),
+              child: const Text("OK"),
+            ),
+          ],
+        ),
+      ).then((password) async {
+        if (password != null && password.isNotEmpty) {
+          try {
+            final sf.PdfDocument document = sf.PdfDocument(inputBytes: pdfBytes);
+            document.security.userPassword = password;
+            document.security.ownerPassword = password;
+            document.security.permissions.addAll([
+              sf.PdfPermissionsFlags.print,
+              sf.PdfPermissionsFlags.copyContent,
+              sf.PdfPermissionsFlags.fillFields,
+            ]);
+
+            final newBytes = await document.save();
+            document.dispose();
+
+            final downloadsDir = Directory('/storage/emulated/0/Download');
+            final outPath =
+                '${downloadsDir.path}/locked_${DateTime.now().millisecondsSinceEpoch}.pdf';
+            final outFile = File(outPath);
+            await outFile.writeAsBytes(newBytes, flush: true);
+
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('🔒 PDF locked & saved at: $outPath')),
+            );
+          } catch (e) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Error locking PDF: $e')),
+            );
+          }
+        }
+      });
+    }
+  }
+
+  Future<void> unlockPDF() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['pdf'],
+      allowMultiple: false,
+      withData: true,
+    );
+
+    if (result != null && result.files.single.bytes != null) {
+      final pdfBytes = result.files.single.bytes!;
+      final TextEditingController passCtrl = TextEditingController();
+
+      await showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text("Enter PDF Password"),
+          content: TextField(
+            controller: passCtrl,
+            obscureText: true,
+            decoration: const InputDecoration(hintText: "Password"),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cancel"),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, passCtrl.text),
+              child: const Text("OK"),
+            ),
+          ],
+        ),
+      ).then((password) async {
+        if (password != null && password.isNotEmpty) {
+          try {
+            final sf.PdfDocument document = sf.PdfDocument(
+              inputBytes: pdfBytes,
+              password: password,
+            );
+
+            // Save without password
+            document.security.userPassword = '';
+            document.security.ownerPassword = '';
+
+            final newBytes = await document.save();
+            document.dispose();
+
+            final downloadsDir = Directory('/storage/emulated/0/Download');
+            final outPath =
+                '${downloadsDir.path}/unlocked_${DateTime.now().millisecondsSinceEpoch}.pdf';
+            final outFile = File(outPath);
+            await outFile.writeAsBytes(newBytes, flush: true);
+
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('🔓 PDF unlocked & saved at: $outPath')),
+            );
+          } catch (e) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('❌ Wrong password or error unlocking PDF')),
+            );
+          }
+        }
+      });
+    }
+  }
+
   Future<void> startImageScanning() async {
     final cameraStatus = await Permission.camera.request();
     final storageStatus = await Permission.storage.request();
@@ -182,6 +316,16 @@ class _PDFMergerScreenState extends State<PDFMergerScreen> {
                 backgroundColor: Colors.green,
                 foregroundColor: Colors.white,
               ),
+            ),
+            const Divider(height: 40),
+            ElevatedButton(
+              onPressed: lockPDF,
+              child: const Text("🔒 Lock PDF"),
+            ),
+            const SizedBox(height: 10),
+            ElevatedButton(
+              onPressed: unlockPDF,
+              child: const Text("🔓 Unlock PDF"),
             ),
             const SizedBox(height: 20),
             if (mergedPath != null)
